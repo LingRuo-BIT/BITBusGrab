@@ -4,14 +4,23 @@
 
 - Base URL: `http://hqapp1.bit.edu.cn`
 - 协议: HTTP
-- 认证: Header 认证
-    - apitoken: < your_api_token >
-    - apitime: < timestamp >
+- 认证: 班车系统 `userid` 参数，加上每请求动态生成的 `apitoken`、`apitime` 请求头。
+
+## 账号登录与接口凭证
+
+本项目用 `BIT-CourseKiller` 中的 CAS 客户端完成统一身份认证账号密码登录。班车网页的 OAuth 流程为：
+
+1. 请求 `https://sso.bit.edu.cn/cas/oauth2.0/authorize`，客户端 ID 为 `BCFW`，回调为 `http://hqapp1.bit.edu.cn/newbanche/`。
+2. 从统一身份认证跳转中读取 CAS `service`，由客户端处理密码、风控和可能出现的短信验证。
+3. 从班车回调地址提取一次性 OAuth `code`，调用 `GET /vehicle/auth-login?code=...`。
+4. 登录接口返回的 `data.userid` 用于后续班车请求；本地只保存该用户标识，不保存密码、短信验证码或 SSO Cookie。
+
+后续每个班车 API 请求都根据当前毫秒时间戳和网页内置算法重新生成 `apitoken`、`apitime`。它们不是需要手工复制并长期保存的账号凭证。
 
 ## 通用说明
 
 - 所有返回均为 JSON。
-- 成功码常见为 `"0"`（字符串），系统异常可能为 `"SYS_UNKNOWN"`，业务错误用 message 描述。
+- 成功码依接口而异：列表类接口通常为 `"0"`，座位与登录接口也可能为 `"1"`；系统异常可能为 `"SYS_UNKNOWN"`，业务错误用 message 描述。
 - 时间格式：`YYYY-MM-DD`（日期），班车时间字段为 `HH:MM`。
 
 ---

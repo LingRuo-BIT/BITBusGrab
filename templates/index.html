@@ -206,64 +206,52 @@
                 <div class="tab-content">
                     <!-- API配置 -->
                     <div class="tab-pane fade show active" id="apiConfig">
-                        <!-- 自动抓包面板 -->
-                        <div class="alert alert-info" role="alert">
-                            <h6 class="alert-heading">
-                                <i class="bi bi-magic"></i> 自动获取凭证(推荐)
-                            </h6>
-                            <p class="mb-2">
-                                <i class="bi bi-shield-check text-success"></i>
-                                通过本地代理自动捕获，<strong>安全可靠</strong>，正确使用不会泄露隐私
-                            </p>
-                            <small class="text-muted d-block mb-2">
-                                💡 原理：在本机运行HTTP代理，从明文流量中提取API凭证，
-                                捕获完成后自动关闭代理。<a data-bs-target="#privacyInfo" data-bs-toggle="collapse"
-                                                          href="#">了解更多 →</a>
-                            </small>
-                            <div class="collapse mt-2" id="privacyInfo">
-                                <div class="card card-body bg-light">
-                                    <small>
-                                        <strong>隐私保护：</strong><br>
-                                        • 代理仅运行在本机，不连接外部服务器<br>
-                                        • 仅提取必要的 API 凭证（Token、Time、UserID）<br>
-                                        • 不记录、不存储、不上传任何其他数据<br>
-                                        • 捕获完成后立即关闭，不会持续监控<br>
-                                        • 所有代码开源，可自行审查
-                                    </small>
-                                </div>
-                            </div>
-                            <button class="btn btn-sm btn-primary mt-2" onclick="openProxyCapture()" type="button">
-                                <i class="bi bi-wifi"></i> 启动自动捕获
-                            </button>
+                        <div class="mb-3">
+                            <label class="form-label">班车服务地址</label>
+                            <input class="form-control" id="apiHost" readonly type="text" value="hqapp1.bit.edu.cn">
                         </div>
 
-                        <hr>
+                        <div class="alert alert-secondary" id="authStatus" role="status">
+                            正在读取登录状态…
+                        </div>
 
-                        <p class="text-muted small">
-                            <i class="bi bi-info-circle"></i> 或手动填写API凭证:
-                        </p>
+                        <div class="card mb-3 d-none" id="authenticatedPanel">
+                            <div class="card-body d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-check-circle-fill text-success"></i> 已登录班车服务</span>
+                                <button class="btn btn-outline-secondary btn-sm" onclick="logoutSso()" type="button">退出登录</button>
+                            </div>
+                        </div>
 
-                        <form id="configForm" onsubmit="return false;">
+                        <form id="ssoLoginForm" onsubmit="return false;">
                             <div class="mb-3">
-                                <label class="form-label">API地址</label>
-                                <input class="form-control" id="apiHost" placeholder="hqapp1.bit.edu.cn" type="text">
-                                <small class="text-muted">默认：hqapp1.bit.edu.cn</small>
+                                <label class="form-label" for="ssoUsername">统一身份认证账号</label>
+                                <input autocomplete="username" class="form-control" id="ssoUsername" type="text">
                             </div>
                             <div class="mb-3">
-                                <label class="form-label">API Token</label>
-                                <input class="form-control" id="apiToken" placeholder="32位字符" type="text">
-                                <small class="text-muted">必须为32位字符</small>
+                                <label class="form-label" for="ssoPassword">密码</label>
+                                <input autocomplete="current-password" class="form-control" id="ssoPassword" type="password">
                             </div>
-                            <div class="mb-3">
-                                <label class="form-label">API Time</label>
-                                <input class="form-control" id="apiTime" placeholder="13位时间戳" type="text">
-                                <small class="text-muted">必须为13位时间戳</small>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">用户ID</label>
-                                <input class="form-control" id="userId" placeholder="您的用户ID" type="text">
-                            </div>
+                            <button class="btn btn-primary" id="ssoLoginButton" onclick="loginSso()" type="button">
+                                <i class="bi bi-box-arrow-in-right"></i> 使用统一身份认证登录
+                            </button>
                         </form>
+
+                        <div class="card mt-3 d-none" id="smsPrompt">
+                            <div class="card-body">
+                                <label class="form-label" for="ssoSmsCode">短信验证码</label>
+                                <p class="small text-muted mb-2">验证码已发送到 <span id="ssoSmsPhone">绑定手机</span></p>
+                                <div class="input-group">
+                                    <input autocomplete="one-time-code" class="form-control" id="ssoSmsCode"
+                                           inputmode="numeric" maxlength="8" type="text">
+                                    <button class="btn btn-outline-primary" onclick="submitSsoSms()" type="button">验证</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <small class="text-muted d-block mt-3">
+                            密码通过本机连接交给程序，再经 HTTPS 提交给统一身份认证；本程序不保存密码或 SSO Cookie。
+                            班车 API 凭证由网页算法按请求生成，只在本地保存班车系统返回的用户标识。
+                        </small>
                     </div>
 
                     <!-- 通知配置 -->
@@ -323,111 +311,6 @@
                 </button>
                 <button class="btn btn-primary" onclick="saveConfig()" type="button">
                     <i class="bi bi-plug-fill"></i> 保存配置
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- 代理捕获模态框 -->
-<div class="modal fade" id="proxyCaptureModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header bg-primary text-white">
-                <h5 class="modal-title">
-                    <i class="bi bi-wifi"></i> 自动捕获API凭证
-                </h5>
-                <button class="btn-close btn-close-white" data-bs-dismiss="modal" type="button"></button>
-            </div>
-            <div class="modal-body">
-                <!-- 状态显示 -->
-                <div class="alert alert-secondary" id="proxyStatus">
-                    <div class="d-flex align-items-center">
-                        <div class="spinner-border spinner-border-sm me-2" role="status">
-                            <span class="visually-hidden">准备中...</span>
-                        </div>
-                        <span>正在启动代理服务器...</span>
-                    </div>
-                </div>
-
-                <!-- 配置说明 -->
-                <div id="proxyInstructions" style="display:none;">
-                    <div class="card mb-3">
-                        <div class="card-header bg-light">
-                            <strong><i class="bi bi-1-circle-fill text-primary"></i> 手机代理配置</strong>
-                        </div>
-                        <div class="card-body">
-                            <ol class="mb-0">
-                                <li>打开手机WiFi设置</li>
-                                <li>选择已连接的WiFi → 配置代理</li>
-                                <li>选择"手动"代理,填写:
-                                    <div class="mt-2 p-3 bg-light rounded">
-                                        <div class="row">
-                                            <div class="col-6">
-                                                <strong>服务器:</strong>
-                                                <code id="proxyServerIP">-</code>
-                                            </div>
-                                            <div class="col-6">
-                                                <strong>端口:</strong>
-                                                <code id="proxyServerPort">8888</code>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </li>
-                                <li class="mt-2">保存配置</li>
-                            </ol>
-                        </div>
-                    </div>
-
-                    <div class="card mb-3">
-                        <div class="card-header bg-light">
-                            <strong><i class="bi bi-2-circle-fill text-primary"></i> 访问班车系统</strong>
-                        </div>
-                        <div class="card-body">
-                            <ol class="mb-0">
-                                <li>在手机i北理工作台打开“班车服务”</li>
-                                <li>系统将自动捕获凭证</li>
-                            </ol>
-                        </div>
-                    </div>
-
-                    <!-- 捕获进度 -->
-                    <div class="card">
-                        <div class="card-header bg-light">
-                            <strong><i class="bi bi-3-circle-fill text-primary"></i> 捕获进度</strong>
-                        </div>
-                        <div class="card-body">
-                            <div class="list-group list-group-flush">
-                                <div class="list-group-item d-flex justify-content-between align-items-center">
-                                    <span>API Token</span>
-                                    <span id="tokenStatus">
-                                        <i class="bi bi-hourglass text-muted"></i> 等待中
-                                    </span>
-                                </div>
-                                <div class="list-group-item d-flex justify-content-between align-items-center">
-                                    <span>API Time</span>
-                                    <span id="timeStatus">
-                                        <i class="bi bi-hourglass text-muted"></i> 等待中
-                                    </span>
-                                </div>
-                                <div class="list-group-item d-flex justify-content-between align-items-center">
-                                    <span>User ID</span>
-                                    <span id="useridStatus">
-                                        <i class="bi bi-hourglass text-muted"></i> 等待中
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="stopProxyCapture()" type="button">
-                    <i class="bi bi-x-circle"></i> 停止并关闭
-                </button>
-                <button class="btn btn-success" id="applyCredentialsBtn" onclick="applyProxyCredentials()" style="display:none;"
-                        type="button">
-                    <i class="bi bi-check-circle"></i> 应用凭证
                 </button>
             </div>
         </div>

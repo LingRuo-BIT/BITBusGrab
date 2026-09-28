@@ -8,6 +8,7 @@
 """
 
 import json
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -74,20 +75,21 @@ class RouteDirection(str, Enum):
 
 @dataclass
 class UserToken:
-    """用户令牌数据类"""
-    api_token: str
-    api_time: str
+    """按班车网页的前端算法生成当前请求令牌。"""
+    api_token: str = ""
+    api_time: str = ""
 
     def __post_init__(self):
-        """初始化后验证"""
-        if not self.api_token or not self.api_token.strip():
-            raise ValidationError("api_token cannot be empty")
-        if len(self.api_token.strip()) != 32:
-            raise ValidationError("api_token must be 32 characters long")
-        if not self.api_time or not self.api_time.strip():
-            raise ValidationError("api_time cannot be empty")
-        if len(self.api_time.strip()) != 13:
-            raise ValidationError("api_time must be 13 characters long (timestamp)")
+        self.refresh()
+
+    def refresh(self):
+        """生成 apitime 和双重 MD5 apitoken；前端每个请求都会重新计算。"""
+        self.api_time = str(int(time.time() * 1000))
+        first_hash = hashlib.md5(
+            f"oVw5lgBQ32mygdfZUvYuKAbYtm7DRN37{self.api_time}".encode("utf-8")
+        ).hexdigest()
+        self.api_token = hashlib.md5(first_hash.encode("ascii")).hexdigest()
+        return self
 
     def is_valid(self) -> bool:
         """检查令牌是否有效"""
@@ -218,6 +220,7 @@ class ShuttleAPI:
         Returns:
             请求头字典
         """
+        token.refresh()
         return {
             "Host": self.config.host,
             "Accept": "application/json",
@@ -551,10 +554,7 @@ def main():
         )
 
         # 创建令牌
-        token = UserToken(
-            api_token=os.getenv("API_TOKEN", ""),
-            api_time=os.getenv("API_TIME", "")
-        )
+        token = UserToken()
 
         userid = os.getenv("USER_ID", "")
 

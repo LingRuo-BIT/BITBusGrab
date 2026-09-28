@@ -8,12 +8,15 @@
 """
 
 import json
+import ipaddress
 import os
+import threading
+from urllib.parse import urlparse
 
 from flask import Flask, render_template, request, jsonify
 
 from api_client import BusAPI
-from proxy_capture import ProxyCaptureServer
+from sso_auth import BusSsoError, SsoLoginManager
 from task_manager import TaskManager
 
 app = Flask(__name__)
@@ -22,31 +25,64 @@ app.secret_key = os.urandom(24)
 # 全局任务管理器
 task_manager = TaskManager()
 
-# 全局代理服务器(单例)
-proxy_server = None
-
 # 配置文件路径
 CONFIG_FILE = 'config.json'
 PRIORITIES_FILE = 'seat_priorities.json'  # 新增:座位优先级配置文件
+CONFIG_LOCK = threading.RLock()
 
 
 def load_config():
     """加载配置"""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {
-        'API_HOST': 'hqapp1.bit.edu.cn',
-        'API_TOKEN': '',
-        'API_TIME': '',
-        'USER_ID': ''
-    }
+    with CONFIG_LOCK:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        else:
+            config = {}
+        config.setdefault('API_HOST', 'hqapp1.bit.edu.cn')
+        config.setdefault('USER_ID', '')
+        return config
 
 
 def save_config(config):
     """保存配置"""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    with CONFIG_LOCK:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def save_authenticated_userid(userid):
+    """仅保存班车系统返回的用户标识，不保存账号、密码或 CAS 会话。"""
+    config = load_config()
+    config['API_HOST'] = 'hqapp1.bit.edu.cn'
+    config['USER_ID'] = userid
+    config.pop('API_TOKEN', None)
+    config.pop('API_TIME', None)
+    save_config(config)
+
+
+def _is_local_auth_request():
+    """账号密码只允许经本机打开的网页提交。"""
+    try:
+        if not ipaddress.ip_address(request.remote_addr or '').is_loopback:
+            return False
+    except ValueError:
+        return False
+
+    local_hosts = {'localhost', '127.0.0.1'}
+    host = urlparse(f'//{request.host}').hostname
+    if (host or '').lower() not in local_hosts:
+        return False
+
+    origin = request.headers.get('Origin')
+    if origin:
+        parsed_origin = urlparse(origin)
+        if parsed_origin.scheme not in {'http', 'https'} or (parsed_origin.hostname or '').lower() not in local_hosts:
+            return False
+    return True
+
+
+auth_manager = SsoLoginManager(on_authenticated=save_authenticated_userid)
 
 
 @app.route('/')
@@ -73,11 +109,8 @@ def search_buses():
         if not config.get('API_HOST'):
             return jsonify({'success': False, 'error': '请先在设置中配置 API 地址'})
 
-        if not config.get('API_TOKEN'):
-            return jsonify({'success': False, 'error': '请先在设置中配置 API Token'})
-
         if not config.get('USER_ID'):
-            return jsonify({'success': False, 'error': '请先在设置中配置用户ID'})
+            return jsonify({'success': False, 'error': '请先登录北理统一身份认证'})
 
         # 调用查询接口
         with BusAPI(config) as api:
@@ -99,6 +132,9 @@ def get_seats(bus_id):
             return jsonify({'success': False, 'error': '缺少日期参数'})
 
         config = load_config()
+
+        if not config.get('USER_ID'):
+            return jsonify({'success': False, 'error': '请先登录北理统一身份认证'})
 
         with BusAPI(config) as api:
             seats_info = api.get_seats(bus_id, date)
@@ -130,8 +166,8 @@ def reserve_ticket():
         config = load_config()
 
         # 验证配置
-        if not config.get('API_HOST') or not config.get('API_TOKEN') or not config.get('USER_ID'):
-            return jsonify({'success': False, 'error': '请先完成系统配置'})
+        if not config.get('API_HOST') or not config.get('USER_ID'):
+            return jsonify({'success': False, 'error': '请先登录北理统一身份认证'})
 
         # 创建抢票任务
         task_id = task_manager.create_task(
@@ -185,29 +221,27 @@ def manage_config():
     """配置管理"""
     if request.method == 'GET':
         config = load_config()
-        return jsonify({'success': True, 'data': config})
+        public_config = {
+            key: value for key, value in config.items()
+            if key not in {'API_TOKEN', 'API_TIME', 'USER_ID'}
+        }
+        public_config['authenticated'] = bool(config.get('USER_ID'))
+        return jsonify({'success': True, 'data': public_config})
     else:
         try:
-            config = request.json
+            incoming = request.get_json(silent=True) or {}
+            config = load_config()
+            api_host = str(incoming.get('API_HOST') or config.get('API_HOST') or 'hqapp1.bit.edu.cn').strip()
+            api_host = api_host.removeprefix('http://').removeprefix('https://').rstrip('/')
+            if api_host.lower() != 'hqapp1.bit.edu.cn':
+                return jsonify({'success': False, 'error': '当前只支持 hqapp1.bit.edu.cn'})
 
-            # 验证必要字段
-            required_fields = ['API_HOST', 'API_TOKEN', 'API_TIME', 'USER_ID']
-            missing_fields = [f for f in required_fields if not config.get(f)]
-
-            if missing_fields:
-                return jsonify({
-                    'success': False,
-                    'error': f'缺少必要配置: {", ".join(missing_fields)}'
-                })
-
-            # 验证 API_TOKEN 长度（应为32位）
-            if len(config['API_TOKEN'].strip()) != 32:
-                return jsonify({'success': False, 'error': 'API Token 必须是32位字符'})
-
-            # 验证 API_TIME 长度（应为13位时间戳）
-            if len(config['API_TIME'].strip()) != 13:
-                return jsonify({'success': False, 'error': 'API Time 必须是13位时间戳'})
-
+            config['API_HOST'] = api_host
+            for key in ('notification_methods', 'email_config', 'wechat_config'):
+                if key in incoming:
+                    config[key] = incoming[key]
+            config.pop('API_TOKEN', None)
+            config.pop('API_TIME', None)
             save_config(config)
             return jsonify({'success': True, 'message': '配置保存成功'})
 
@@ -215,123 +249,56 @@ def manage_config():
             return jsonify({'success': False, 'error': str(e)})
 
 
-@app.route('/api/proxy/start', methods=['POST'])
-def start_proxy():
-    """启动代理服务器"""
-    global proxy_server
+@app.route('/api/auth/login', methods=['POST'])
+def start_sso_login():
+    """启动本机网页发起的统一身份认证。"""
+    if not _is_local_auth_request():
+        return jsonify({'success': False, 'error': '登录仅允许从本机网页发起'}), 403
 
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '登录参数格式无效'}), 400
     try:
-        if proxy_server and proxy_server.is_running:
-            return jsonify({
-                'success': False,
-                'error': '代理服务器已在运行中'
-            })
-
-        # 创建并启动代理服务器
-        proxy_server = ProxyCaptureServer(host='0.0.0.0', port=8888)
-        proxy_server.start()
-
-        return jsonify({
-            'success': True,
-            'message': '代理服务器已启动',
-            'local_ip': proxy_server.get_local_ip(),
-            'port': proxy_server.port
-        })
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'启动失败: {str(e)}'
-        })
+        auth_id = auth_manager.start(data.get('username', ''), data.get('password', ''))
+        return jsonify({'success': True, 'auth_id': auth_id}), 202
+    except (ValueError, BusSsoError) as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
 
 
-@app.route('/api/proxy/stop', methods=['POST'])
-def stop_proxy():
-    """停止代理服务器"""
-    global proxy_server
+@app.route('/api/auth/status/<auth_id>')
+def sso_login_status(auth_id):
+    if not _is_local_auth_request():
+        return jsonify({'success': False, 'error': '登录状态仅允许从本机网页读取'}), 403
+    status = auth_manager.status(auth_id)
+    if status is None:
+        return jsonify({'success': False, 'error': '登录请求已失效'}), 404
+    return jsonify({'success': True, **status})
 
+
+@app.route('/api/auth/sms', methods=['POST'])
+def submit_sso_sms():
+    if not _is_local_auth_request():
+        return jsonify({'success': False, 'error': '短信验证码仅允许从本机网页提交'}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '短信验证参数格式无效'}), 400
     try:
-        if not proxy_server or not proxy_server.is_running:
-            return jsonify({
-                'success': False,
-                'error': '代理服务器未运行'
-            })
-
-        proxy_server.stop()
-        proxy_server = None
-
-        return jsonify({
-            'success': True,
-            'message': '代理服务器已停止'
-        })
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'停止失败: {str(e)}'
-        })
+        auth_manager.submit_sms(data.get('auth_id', ''), data.get('code', ''))
+        return jsonify({'success': True})
+    except (ValueError, BusSsoError) as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
 
 
-@app.route('/api/proxy/status')
-def proxy_status():
-    """获取代理服务器状态"""
-    global proxy_server
-
-    if not proxy_server:
-        return jsonify({
-            'success': True,
-            'is_running': False,
-            'credentials': None
-        })
-
-    credentials = proxy_server.get_credentials()
-
-    return jsonify({
-        'success': True,
-        'is_running': proxy_server.is_running,
-        'credentials': credentials,
-        'is_complete': proxy_server.is_credentials_complete(),
-        'local_ip': proxy_server.get_local_ip() if proxy_server.is_running else None,
-        'port': proxy_server.port if proxy_server.is_running else None
-    })
-
-
-@app.route('/api/proxy/apply', methods=['POST'])
-def apply_proxy_credentials():
-    """应用捕获的凭证到配置"""
-    global proxy_server
-
-    try:
-        if not proxy_server or not proxy_server.is_credentials_complete():
-            return jsonify({
-                'success': False,
-                'error': '凭证未完整捕获'
-            })
-
-        credentials = proxy_server.get_credentials()
-
-        # 加载现有配置
-        config = load_config()
-
-        # 更新凭证
-        config['API_TOKEN'] = credentials['API_TOKEN']
-        config['API_TIME'] = credentials['API_TIME']
-        config['USER_ID'] = credentials['USER_ID']
-
-        # 保存配置
-        save_config(config)
-
-        return jsonify({
-            'success': True,
-            'message': '凭证已应用到配置',
-            'config': config
-        })
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'应用失败: {str(e)}'
-        })
+@app.route('/api/auth/logout', methods=['POST'])
+def logout_sso():
+    if not _is_local_auth_request():
+        return jsonify({'success': False, 'error': '退出登录仅允许从本机网页发起'}), 403
+    config = load_config()
+    config['USER_ID'] = ''
+    config.pop('API_TOKEN', None)
+    config.pop('API_TIME', None)
+    save_config(config)
+    return jsonify({'success': True})
 
 
 @app.route('/api/priorities', methods=['GET', 'POST'])
@@ -364,4 +331,4 @@ def manage_priorities():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=23200)
+    app.run(debug=False, host='127.0.0.1', port=23200)

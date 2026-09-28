@@ -73,10 +73,7 @@ let seatPriorities = {}
 // 配置缓存（用于取消时恢复）
 let configCache = null;
 
-// 代理捕获相关变量
-let proxyCheckInterval = null;
-let proxyModal = null;
-let autoCloseTimer = null;
+let activeSsoAuthId = null;
 
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function () {
@@ -129,6 +126,8 @@ document.addEventListener('DOMContentLoaded', function () {
         if (configCache) {
             restoreConfigCache();
         }
+        document.getElementById('ssoPassword').value = '';
+        document.getElementById('ssoSmsCode').value = '';
     });
 
     // 取消按钮事件
@@ -139,14 +138,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    // 监听代理捕获模态框关闭事件
-    const proxyCaptureModalElement = document.getElementById('proxyCaptureModal');
-    if (proxyCaptureModalElement) {
-        proxyCaptureModalElement.addEventListener('hidden.bs.modal', function () {
-            // 模态框关闭时自动停止代理服务器
-            stopProxyCapture();
-        });
-    }
 });
 
 // 加载座位优先级配置(从服务器)
@@ -943,9 +934,7 @@ async function loadConfig() {
 
             // API配置
             document.getElementById('apiHost').value = config.API_HOST || '';
-            document.getElementById('apiToken').value = config.API_TOKEN || '';
-            document.getElementById('apiTime').value = config.API_TIME || '';
-            document.getElementById('userId').value = config.USER_ID || '';
+            updateSsoAuthStatus(config.authenticated);
 
             // 通知配置
             const notificationMethods = config.notification_methods || [];
@@ -980,9 +969,6 @@ function saveConfigCache() {
     configCache = {
         // API配置
         API_HOST: document.getElementById('apiHost').value,
-        API_TOKEN: document.getElementById('apiToken').value,
-        API_TIME: document.getElementById('apiTime').value,
-        USER_ID: document.getElementById('userId').value,
 
         // 通知配置
         enableEmail: document.getElementById('enableEmail').checked,
@@ -1003,9 +989,6 @@ function restoreConfigCache() {
 
     // 恢复 API 配置
     document.getElementById('apiHost').value = configCache.API_HOST;
-    document.getElementById('apiToken').value = configCache.API_TOKEN;
-    document.getElementById('apiTime').value = configCache.API_TIME;
-    document.getElementById('userId').value = configCache.USER_ID;
 
     // 恢复通知配置
     document.getElementById('enableEmail').checked = configCache.enableEmail;
@@ -1026,9 +1009,6 @@ function restoreConfigCache() {
 window.saveConfig = async function () {
     const config = {
         API_HOST: document.getElementById('apiHost').value.trim() || 'hqapp1.bit.edu.cn',
-        API_TOKEN: document.getElementById('apiToken').value.trim(),
-        API_TIME: document.getElementById('apiTime').value.trim(),
-        USER_ID: document.getElementById('userId').value.trim(),
 
         notification_methods: [],
         email_config: {},
@@ -1053,32 +1033,6 @@ window.saveConfig = async function () {
         };
     }
 
-    // 前端验证
-    if (!config.API_TOKEN) {
-        toast.warning('请输入 API Token');
-        return;
-    }
-
-    if (config.API_TOKEN.length !== 32) {
-        toast.warning('API Token 必须是32位字符');
-        return;
-    }
-
-    if (!config.API_TIME) {
-        toast.warning('请输入 API Time');
-        return;
-    }
-
-    if (config.API_TIME.length !== 13) {
-        toast.warning('API Time 必须是13位时间戳');
-        return;
-    }
-
-    if (!config.USER_ID) {
-        toast.warning('请输入用户ID');
-        return;
-    }
-
     try {
         const response = await fetch('/api/config', {
             method: 'POST',
@@ -1100,353 +1054,144 @@ window.saveConfig = async function () {
     }
 };
 
-// 更新凭证状态显示
-function updateCredentialStatus(elementId, value) {
-    const element = document.getElementById(elementId);
-    if (!element) return;
-
-    if (value && value !== null && value !== 'null') {
-        const masked = value.length > 8 ?
-            value.substring(0, 4) + '***' + value.substring(value.length - 4) :
-            value.substring(0, 2) + '***';
-        element.innerHTML = `<i class="bi bi-check-circle-fill text-success"></i> ${masked}`;
-    } else {
-        element.innerHTML = `<i class="bi bi-hourglass text-muted"></i> 等待中`;
-    }
+function updateSsoAuthStatus(authenticated) {
+    const status = document.getElementById('authStatus');
+    const panel = document.getElementById('authenticatedPanel');
+    const form = document.getElementById('ssoLoginForm');
+    panel.classList.toggle('d-none', !authenticated);
+    form.classList.toggle('d-none', authenticated);
+    status.className = authenticated ? 'alert alert-success' : 'alert alert-secondary';
+    status.textContent = authenticated ? '已完成北理统一身份认证。' : '尚未登录班车服务。';
 }
 
-// 打开代理捕获窗口
-window.openProxyCapture = async function () {
-    try {
-        // 启动代理服务器
-        const response = await fetch('/api/proxy/start', {method: 'POST'});
-        const result = await response.json();
-
-        if (result.success) {
-            // 显示模态框
-            proxyModal = new bootstrap.Modal(document.getElementById('proxyCaptureModal'));
-            proxyModal.show();
-
-            // 更新配置信息
-            document.getElementById('proxyServerIP').textContent = result.local_ip;
-            document.getElementById('proxyServerPort').textContent = result.port;
-
-            // 显示配置说明
-            document.getElementById('proxyStatus').innerHTML = `
-                <div class="alert alert-success">
-                    <i class="bi bi-check-circle"></i> 代理服务器已启动
-                </div>
-            `;
-            document.getElementById('proxyInstructions').style.display = 'block';
-
-            // 重置状态
-            document.getElementById('applyCredentialsBtn').style.display = 'none';
-            updateCredentialStatus('tokenStatus', null);
-            updateCredentialStatus('timeStatus', null);
-            updateCredentialStatus('useridStatus', null);
-
-            // 为捕获进度卡片添加流动光影效果
-            setTimeout(() => {
-                const progressCard = document.querySelector('#proxyInstructions .card:last-child');
-                if (progressCard) {
-                    progressCard.classList.add('shimmer-effect');
-                }
-            }, 100);
-
-            // 开始轮询检查捕获状态
-            startProxyStatusCheck();
-        } else {
-            toast.error(result.error || '启动代理失败');
-        }
-    } catch (error) {
-        toast.error('网络请求失败: ' + error.message);
-    }
-};
-
-// 开始检查代理状态
-function startProxyStatusCheck() {
-    if (proxyCheckInterval) {
-        clearInterval(proxyCheckInterval);
+window.loginSso = async function () {
+    const usernameInput = document.getElementById('ssoUsername');
+    const passwordInput = document.getElementById('ssoPassword');
+    const button = document.getElementById('ssoLoginButton');
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!username || !password) {
+        toast.warning('请输入统一身份认证账号和密码');
+        return;
     }
 
-    proxyCheckInterval = setInterval(async () => {
-        try {
-            const response = await fetch('/api/proxy/status');
-            const result = await response.json();
-
-            if (result.success && result.credentials) {
-                const cred = result.credentials;
-
-                // 更新状态显示
-                updateCredentialStatus('tokenStatus', cred.API_TOKEN);
-                updateCredentialStatus('timeStatus', cred.API_TIME);
-                updateCredentialStatus('useridStatus', cred.USER_ID);
-
-                // 如果全部捕获完成
-                if (result.is_complete) {
-                    clearInterval(proxyCheckInterval);
-                    proxyCheckInterval = null;
-
-                    document.getElementById('proxyStatus').innerHTML = `
-                        <div class="alert alert-success">
-                            <i class="bi bi-check-circle-fill"></i> 
-                            <strong>捕获完成!</strong> 凭证将自动应用到配置中
-                        </div>
-                    `;
-
-                    const progressCard = document.querySelector('#proxyInstructions .card:last-child');
-                    if (progressCard) {
-                        progressCard.classList.remove('shimmer-effect');
-                    }
-
-                    document.getElementById('applyCredentialsBtn').style.display = 'inline-block';
-
-                    // 自动应用凭证
-                    toast.success('凭证捕获完成，正在自动应用...', 2000);
-
-                    setTimeout(async () => {
-                        await applyProxyCredentials();
-
-                        // 显示关闭代理提醒
-                        showProxyCloseReminder();
-
-                        // 延迟关闭代理和模态框(5秒)
-                        autoCloseTimer = setTimeout(async () => {
-                            await stopProxyCapture();
-                        }, 5000);
-                    }, 1000);
-                }
-            }
-        } catch (error) {
-            console.error('检查代理状态失败:', error);
-        }
-    }, 1000);
-}
-
-// 显示关闭代理提醒
-function showProxyCloseReminder() {
-    // 创建提醒对话框
-    const reminderHtml = `
-        <div class="modal fade" id="proxyReminderModal" tabindex="-1" data-bs-backdrop="static">
-            <div class="modal-dialog modal-dialog-centered">
-                <div class="modal-content">
-                    <div class="modal-header bg-warning text-dark">
-                        <h5 class="modal-title">
-                            <i class="bi bi-exclamation-triangle-fill"></i> 重要提醒
-                        </h5>
-                    </div>
-                    <div class="modal-body">
-                        <div class="alert alert-warning mb-3">
-                            <h6 class="alert-heading">
-                                <i class="bi bi-wifi-off"></i> 请关闭手机代理设置
-                            </h6>
-                            <p class="mb-2">凭证已成功捕获并应用，代理服务器将在 <span id="autoCloseCountdown">5</span> 秒后自动关闭。</p>
-                            <p class="mb-0"><strong>请立即在手机上关闭代理设置，以恢复正常上网！</strong></p>
-                        </div>
-                        
-                        <div class="card">
-                            <div class="card-header bg-light">
-                                <strong><i class="bi bi-phone"></i> 关闭步骤：</strong>
-                            </div>
-                            <div class="card-body">
-                                <ol class="mb-0">
-                                    <li>打开手机WiFi设置</li>
-                                    <li>选择已连接的WiFi</li>
-                                    <li>将代理设置改为 <strong>"关闭"</strong> 或 <strong>"无"</strong></li>
-                                    <li>保存设置</li>
-                                </ol>
-                            </div>
-                        </div>
-                        
-                        <div class="mt-3 text-center">
-                            <small class="text-muted">
-                                <i class="bi bi-info-circle"></i> 
-                                不关闭代理可能导致手机无法正常上网
-                            </small>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-primary" onclick="closeProxyReminder()">
-                            <i class="bi bi-check-circle"></i> 我已关闭代理
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
-
-    // 添加到页面
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = reminderHtml;
-    document.body.appendChild(tempDiv.firstElementChild);
-
-    // 显示模态框
-    const reminderModal = new bootstrap.Modal(document.getElementById('proxyReminderModal'));
-    reminderModal.show();
-
-    // 倒计时显示
-    let countdown = 5;
-    const countdownInterval = setInterval(() => {
-        countdown--;
-        const countdownElement = document.getElementById('autoCloseCountdown');
-        if (countdownElement) {
-            countdownElement.textContent = countdown;
-        }
-        if (countdown <= 0) {
-            clearInterval(countdownInterval);
-        }
-    }, 1000);
-
-    // 播放提示音(如果浏览器支持)
+    button.disabled = true;
     try {
-        const beep = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIGmi87OqgUBELTanm8LhjHQU2jdXzzn0vBSF1xe/glEILElyx6OyrWBUIQ5zd8sFuJAUqgM3y2Ik3CBlouu7pn08RC0yo5O+5YxwGNo3V88x8LgUgdMXv4ZNCDRJZR');
-        beep.play().catch(() => {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, password})
         });
-    } catch (e) {
-        // 忽略音频错误
+        passwordInput.value = '';
+        const result = await response.json();
+        if (!result.success) {
+            toast.error(result.error || '无法启动登录');
+            return;
+        }
+
+        activeSsoAuthId = result.auth_id;
+        document.getElementById('smsPrompt').classList.add('d-none');
+        document.getElementById('authStatus').className = 'alert alert-info';
+        document.getElementById('authStatus').textContent = '正在通过统一身份认证…';
+        pollSsoLoginStatus();
+    } catch (error) {
+        passwordInput.value = '';
+        toast.error('登录请求失败: ' + error.message);
+    } finally {
+        button.disabled = false;
+    }
+};
+
+async function pollSsoLoginStatus() {
+    if (!activeSsoAuthId) return;
+    try {
+        const response = await fetch(`/api/auth/status/${encodeURIComponent(activeSsoAuthId)}`);
+        const result = await response.json();
+        if (!result.success) {
+            activeSsoAuthId = null;
+            document.getElementById('authStatus').className = 'alert alert-danger';
+            document.getElementById('authStatus').textContent = result.error || '登录状态读取失败';
+            return;
+        }
+
+        const status = document.getElementById('authStatus');
+        status.textContent = result.message || '正在登录…';
+        if (result.status === 'waiting_sms') {
+            status.className = 'alert alert-warning';
+            document.getElementById('ssoSmsPhone').textContent = result.phone || '绑定手机';
+            document.getElementById('smsPrompt').classList.remove('d-none');
+            return;
+        }
+        if (result.status === 'succeeded') {
+            activeSsoAuthId = null;
+            document.getElementById('smsPrompt').classList.add('d-none');
+            usernameClear();
+            updateSsoAuthStatus(true);
+            toast.success('班车服务登录成功');
+            await loadConfig();
+            return;
+        }
+        if (result.status === 'failed') {
+            activeSsoAuthId = null;
+            status.className = 'alert alert-danger';
+            document.getElementById('smsPrompt').classList.add('d-none');
+            return;
+        }
+        status.className = 'alert alert-info';
+        setTimeout(pollSsoLoginStatus, 700);
+    } catch (error) {
+        activeSsoAuthId = null;
+        document.getElementById('authStatus').className = 'alert alert-danger';
+        document.getElementById('authStatus').textContent = '读取登录状态失败: ' + error.message;
     }
 }
 
-// 关闭代理提醒
-window.closeProxyReminder = function () {
-    const modal = bootstrap.Modal.getInstance(document.getElementById('proxyReminderModal'));
-    if (modal) {
-        modal.hide();
+function usernameClear() {
+    document.getElementById('ssoUsername').value = '';
+    document.getElementById('ssoPassword').value = '';
+    document.getElementById('ssoSmsCode').value = '';
+}
+
+window.submitSsoSms = async function () {
+    if (!activeSsoAuthId) return;
+    const input = document.getElementById('ssoSmsCode');
+    const code = input.value.trim();
+    if (!code) {
+        toast.warning('请输入短信验证码');
+        return;
     }
-
-    // 清除自动关闭定时器
-    if (autoCloseTimer) {
-        clearTimeout(autoCloseTimer);
-        autoCloseTimer = null;
-    }
-
-    // 移除模态框元素
-    setTimeout(() => {
-        const modalElement = document.getElementById('proxyReminderModal');
-        if (modalElement) {
-            modalElement.remove();
-        }
-    }, 500);
-
-    toast.success('感谢您的配合！现在可以正常使用系统了 🎉');
-
-    // 立即关闭凭证捕获模态框
-    setTimeout(() => {
-        stopProxyCapture();
-    }, 100); // 稍微延迟一下,让提醒模态框先完成关闭动画
-};
-
-// 停止代理捕获
-window.stopProxyCapture = async function () {
     try {
-        // 停止轮询
-        if (proxyCheckInterval) {
-            clearInterval(proxyCheckInterval);
-            proxyCheckInterval = null;
-        }
-
-        // 清除自动关闭定时器
-        if (autoCloseTimer) {
-            clearTimeout(autoCloseTimer);
-            autoCloseTimer = null;
-        }
-
-        // 停止代理服务器
-        const response = await fetch('/api/proxy/stop', {method: 'POST'});
+        const response = await fetch('/api/auth/sms', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({auth_id: activeSsoAuthId, code})
+        });
+        input.value = '';
         const result = await response.json();
-
-        if (!result.success && result.error !== '代理服务器未运行') {
-            console.error('停止代理失败:', result.error);
+        if (!result.success) {
+            toast.error(result.error || '短信验证码提交失败');
+            return;
         }
-
-        // 关闭模态框
-        if (proxyModal) {
-            proxyModal.hide();
-            proxyModal = null;
-        }
+        document.getElementById('smsPrompt').classList.add('d-none');
+        document.getElementById('authStatus').className = 'alert alert-info';
+        document.getElementById('authStatus').textContent = '正在验证短信验证码…';
+        setTimeout(pollSsoLoginStatus, 400);
     } catch (error) {
-        console.error('停止代理失败:', error);
+        toast.error('短信验证码提交失败: ' + error.message);
     }
 };
 
-// 应用代理捕获的凭证
-window.applyProxyCredentials = async function () {
+window.logoutSso = async function () {
     try {
-        const response = await fetch('/api/proxy/apply', {method: 'POST'});
+        const response = await fetch('/api/auth/logout', {method: 'POST'});
         const result = await response.json();
-
-        if (result.success) {
-            toast.success('凭证已自动填充到配置中！', 3000);
-
-            // 刷新配置显示
-            await loadConfig();
-
-            // 不立即关闭，等待自动关闭
-            return true;
-        } else {
-            toast.error(result.error || '应用凭证失败');
-            return false;
+        if (!result.success) {
+            toast.error(result.error || '退出登录失败');
+            return;
         }
+        updateSsoAuthStatus(false);
+        toast.success('已退出班车服务');
     } catch (error) {
-        toast.error('网络请求失败: ' + error.message);
-        return false;
+        toast.error('退出登录失败: ' + error.message);
     }
 };
-
-// 确保在文件开头就定义所有全局函数
-(function () {
-    'use strict';
-
-    window.openProxyCapture = async function () {
-        try {
-            // 启动代理服务器
-            const response = await fetch('/api/proxy/start', {method: 'POST'});
-            const result = await response.json();
-
-            if (result.success) {
-                // 显示模态框
-                proxyModal = new bootstrap.Modal(document.getElementById('proxyCaptureModal'));
-                proxyModal.show();
-
-                // 更新配置信息
-                document.getElementById('proxyServerIP').textContent = result.local_ip;
-                document.getElementById('proxyServerPort').textContent = result.port;
-
-                // 显示配置说明
-                document.getElementById('proxyStatus').innerHTML = `
-                    <div class="alert alert-success">
-                        <i class="bi bi-check-circle"></i> 代理服务器已启动
-                    </div>
-                `;
-                document.getElementById('proxyInstructions').style.display = 'block';
-
-                // 重置状态
-                document.getElementById('applyCredentialsBtn').style.display = 'none';
-                updateCredentialStatus('tokenStatus', null);
-                updateCredentialStatus('timeStatus', null);
-                updateCredentialStatus('useridStatus', null);
-
-                setTimeout(() => {
-                    const progressCard = document.querySelector('#proxyInstructions .card:last-child');
-                    if (progressCard) {
-                        progressCard.classList.add('shimmer-effect');
-                    }
-                }, 100);
-
-                // 开始轮询检查捕获状态
-                startProxyStatusCheck();
-            } else {
-                toast.error(result.error || '启动代理失败');
-            }
-        } catch (error) {
-            toast.error('网络请求失败: ' + error.message);
-        }
-    };
-
-    // 确保在页面卸载时停止代理
-    window.addEventListener('beforeunload', function () {
-        if (proxyCheckInterval) {
-            stopProxyCapture();
-        }
-    });
-})();

@@ -20,7 +20,7 @@ class BusAPI:
         初始化 BusAPI
         
         Args:
-            config: 配置字典，包含 API_HOST, API_TOKEN, API_TIME, USER_ID
+            config: 配置字典，包含 API_HOST 和 USER_ID
         """
         self.user_id = config.get('USER_ID', '')
 
@@ -37,10 +37,7 @@ class BusAPI:
         )
 
         # 创建用户令牌
-        self.token = UserToken(
-            api_token=config.get('API_TOKEN', ''),
-            api_time=config.get('API_TIME', '')
-        )
+        self.token = UserToken()
 
         # 创建 ShuttleAPI 实例
         self.api = ShuttleAPI(api_config)
